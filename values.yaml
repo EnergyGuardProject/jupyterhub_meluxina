@@ -1,0 +1,84 @@
+imagePullSecrets:
+- name: gitlab-regcred
+
+ingress:
+  enabled: false
+
+hub:
+  image:
+    name: theopnt12/jupyterhub-meluxina
+    tag: v2-amd64
+  extraEnv:
+    SLURM_TOKEN:
+      valueFrom:
+        secretKeyRef:
+          name: meluxina-credentials
+          key: slurm-token
+    SLURM_USER:
+      valueFrom:
+        secretKeyRef:
+          name: meluxina-credentials
+          key: slurm-user
+    SLURM_ACCOUNT:
+      valueFrom:
+        secretKeyRef:
+          name: meluxina-credentials
+          key: slurm-account
+    WORKING_DIRECTORY:
+      valueFrom:
+        secretKeyRef:
+          name: meluxina-credentials
+          key: working-directory
+    COMPUTE_HUB_BASE:
+      valueFrom:
+        secretKeyRef:
+          name: meluxina-credentials
+          key: compute-hub-base
+
+  extraConfig:
+    01-custom-config: |
+      c.JupyterHub.spawner_class = "slurmrestapispawner.SlurmRESTAPISpawner"
+      c.JupyterHub.authenticator_class = "dummy"
+
+      # Dev/testing auth. Replace with real auth for production.
+      c.Authenticator.allow_all = True
+      c.DummyAuthenticator.password = ""
+
+      c.SlurmRESTAPISpawner.environment = {
+          "COMPUTE_HUB_BASE": os.environ["COMPUTE_HUB_BASE"]
+      }
+      c.SlurmRESTAPISpawner.slurmrestd_url = "https://slurm.cloud.lxp.lu"
+      c.SlurmRESTAPISpawner.slurm_api_version = "v0.0.40" #43?
+      c.SlurmRESTAPISpawner.slurm_user = os.environ["SLURM_USER"]
+      c.SlurmRESTAPISpawner.slurm_token = os.environ["SLURM_TOKEN"]
+      c.SlurmRESTAPISpawner.partition = "gpu"
+      c.SlurmRESTAPISpawner.account = os.environ["SLURM_ACCOUNT"]
+      c.SlurmRESTAPISpawner.qos = "default"
+      c.SlurmRESTAPISpawner.time_limit = "02:00:00"
+      c.SlurmRESTAPISpawner.current_working_directory = os.environ["WORKING_DIRECTORY"]
+      c.SlurmRESTAPISpawner.start_timeout = 600
+      c.SlurmRESTAPISpawner.debug_slurm_api = False
+      c.SlurmRESTAPISpawner.debug_show_batch_script = False
+      c.SlurmRESTAPISpawner.enable_user_options_form = True
+
+      c.SlurmRESTAPISpawner.prologue = """
+      export HOME=$(getent passwd $USER | cut -d: -f6)
+      module load Python
+      export VENV="$HOME/test_restapi"
+      if [[ ! -d $VENV ]]; then
+          python3 -m venv $VENV
+          source $VENV/bin/activate
+          pip install --upgrade pip
+          pip install uv
+          uv pip install jupyterhub jupyterlab
+          uv pip install git+https://github.com/LuxProvide/slurmrestapispawner.git
+      fi
+      source $VENV/bin/activate
+      Local cert, 
+      export REQUESTS_CA_BUNDLE=$HOME/certs/mkcert-ca.crt
+      export SSL_CERT_FILE="${REQUESTS_CA_BUNDLE}"
+      export CURL_CA_BUNDLE="${REQUESTS_CA_BUNDLE}"
+      export JUPYTERHUB_API_URL="${COMPUTE_HUB_BASE}/hub/api"
+      export JUPYTERHUB_ACTIVITY_URL="${JUPYTERHUB_API_URL}/users/${JUPYTERHUB_USER}/activity"
+      env | grep JUPYTER"""
+      #

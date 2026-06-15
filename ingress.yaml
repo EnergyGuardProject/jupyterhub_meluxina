@@ -1,0 +1,22 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hub
+  namespace: jupyterhub
+spec:
+  ingressClassName: cilium
+  tls:
+    - hosts:
+        - ${HOSTNAME}
+      secretName: jupyter-cert
+  rules:
+    - host: ${HOSTNAME}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: proxy-public
+                port:
+                  number: 80
