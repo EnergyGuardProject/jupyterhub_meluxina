@@ -1,0 +1,3 @@
+*.pem
+meluxina-secret.yaml
+.env

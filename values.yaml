@@ -7,7 +7,7 @@ ingress:
 hub:
   image:
     name: theopnt12/jupyterhub-meluxina
-    tag: v2-amd64
+    tag: v3-amd64
   extraEnv:
     SLURM_USER:
       valueFrom:
@@ -110,10 +110,10 @@ hub:
 
       # Per-user Slurm token: after Keycloak login, resolve the user's email and
       # ask the token-store service (keyed on email -> team -> token) for their
-      # Slurm token. This gates the spawn page (so users with no HPC access see
-      # a clear message *instead of* the Server Options form) and supplies the
-      # token at spawn time. Re-checked on every spawn so team membership /
-      # token rotations take effect immediately.
+      # Slurm token, then supply it to the spawn. If the user has no team token
+      # (token store returns 404) the pre_spawn_hook raises and JupyterHub shows
+      # a "no HPC access" screen instead of starting a server. Re-checked on
+      # every spawn so team membership / token rotations take effect immediately.
       import json
       from urllib.parse import quote
       from tornado import web
@@ -176,44 +176,6 @@ hub:
           spawner.slurm_token = await resolve_slurm_token(spawner)
 
       c.SlurmRESTAPISpawner.pre_spawn_hook = fetch_user_slurm_token
-
-      async def hpc_options_form(spawner):
-          # Check HPC access first: if the user has no team token this raises
-          # and JupyterHub shows the message page INSTEAD of the form below.
-          await resolve_slurm_token(spawner)
-          s = spawner
-          # Same form as the spawner's default, minus the manual "Token" field
-          # (the token is resolved automatically from the token store).
-          return f"""
-      <div style="max-width: 400px; margin: auto;">
-          <div style="margin-bottom: 1em;">
-              <label for="slurm-account">Account</label>
-              <input name="account" id="slurm-account" type="text" value="{s.account}" placeholder="Enter account" style="width: 100%;" />
-          </div>
-          <div style="margin-bottom: 1em;">
-              <label for="slurm-partition">Partition</label>
-              <input name="partition" id="slurm-partition" type="text" value="{s.partition}" placeholder="Enter partition" style="width: 100%;" />
-          </div>
-          <div style="margin-bottom: 1em;">
-              <label for="slurm-qos">QoS</label>
-              <input name="qos" id="slurm-qos" type="text" value="{s.qos}" placeholder="Enter QoS" style="width: 100%;" />
-          </div>
-          <div style="margin-bottom: 1em;">
-              <label for="slurm-time-limit">Time Limit</label>
-              <input name="time_limit" id="slurm-time-limit" type="text" value="{s.time_limit}" placeholder="e.g., 02:00:00" style="width: 100%;" />
-          </div>
-          <div style="margin-bottom: 1em;">
-              <label for="slurm-user">Slurm User</label>
-              <input name="slurm_user" id="slurm-user" type="text" value="{s.slurm_user}" placeholder="Enter Slurm user" style="width: 100%;" />
-          </div>
-          <div style="margin-bottom: 1em;">
-              <label for="cwd">Current Working Directory</label>
-              <input name="current_working_directory" id="cwd" type="text" value="{s.current_working_directory}" placeholder="Enter working directory" style="width: 100%;" />
-          </div>
-      </div>
-      """
-
-      c.SlurmRESTAPISpawner.options_form = hpc_options_form
 
       c.SlurmRESTAPISpawner.environment = {
           "COMPUTE_HUB_BASE": os.environ["COMPUTE_HUB_BASE"]
