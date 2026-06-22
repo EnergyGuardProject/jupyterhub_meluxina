@@ -9,11 +9,6 @@ hub:
     name: theopnt12/jupyterhub-meluxina
     tag: v2-amd64
   extraEnv:
-    SLURM_TOKEN:
-      valueFrom:
-        secretKeyRef:
-          name: meluxina-credentials
-          key: slurm-token
     SLURM_USER:
       valueFrom:
         secretKeyRef:
@@ -54,6 +49,23 @@ hub:
         secretKeyRef:
           name: meluxina-credentials
           key: keycloak_base_url
+    TOKEN_STORE_URL:
+      valueFrom:
+        secretKeyRef:
+          name: meluxina-credentials
+          key: token-store-url
+    TOKEN_STORE_API_KEY:
+      valueFrom:
+        secretKeyRef:
+          name: meluxina-credentials
+          key: token-store-api-key
+    # Encrypts auth_state at rest; required because we read the user's email
+    # from the OAuth auth_state to resolve their per-user Slurm token.
+    JUPYTERHUB_CRYPT_KEY:
+      valueFrom:
+        secretKeyRef:
+          name: meluxina-credentials
+          key: jupyterhub-crypt-key
 
   extraConfig:
     01-custom-config: |
@@ -83,6 +95,10 @@ hub:
       c.GenericOAuthenticator.username_claim = "preferred_username"
       c.GenericOAuthenticator.allow_all = True
 
+      # Persist the OAuth response (encrypted with JUPYTERHUB_CRYPT_KEY) so the
+      # spawner can read the user's email and resolve their per-user Slurm token.
+      c.GenericOAuthenticator.enable_auth_state = True
+
       # RP-initiated logout: logging out of JupyterHub also ends the Keycloak
       # SSO session, otherwise the next login silently re-authenticates.
       c.GenericOAuthenticator.logout_redirect_url = (
@@ -92,13 +108,123 @@ hub:
           })
       )
 
+      # Per-user Slurm token: after Keycloak login, resolve the user's email and
+      # ask the token-store service (keyed on email -> team -> token) for their
+      # Slurm token. This gates the spawn page (so users with no HPC access see
+      # a clear message *instead of* the Server Options form) and supplies the
+      # token at spawn time. Re-checked on every spawn so team membership /
+      # token rotations take effect immediately.
+      import json
+      from urllib.parse import quote
+      from tornado import web
+      from tornado.httpclient import AsyncHTTPClient, HTTPClientError, HTTPRequest
+
+      _NO_HPC = (
+          "You are not a member of a team with access to HPC. "
+          "Contact your administrator to be added to a team."
+      )
+
+      async def resolve_slurm_token(spawner):
+          """Return the user's Slurm token, or raise web.HTTPError.
+
+          403 -> the user has no team token (no HPC access);
+          503 -> the token store itself is unreachable/erroring.
+          """
+          auth_state = await spawner.user.get_auth_state()
+          email = None
+          if auth_state:
+              email = (auth_state.get("oauth_user") or {}).get("email")
+          # Fall back to the Hub username if email is somehow absent.
+          username = email or spawner.user.name
+
+          base = os.environ["TOKEN_STORE_URL"].rstrip("/")
+          url = base + "/users/" + quote(username, safe="") + "/token"
+          req = HTTPRequest(
+              url,
+              method="GET",
+              headers={"X-API-Key": os.environ["TOKEN_STORE_API_KEY"]},
+              request_timeout=15,
+          )
+          try:
+              resp = await AsyncHTTPClient().fetch(req)
+          except HTTPClientError as e:
+              # 400/404 => the service answered: this user has no team token.
+              if e.code in (400, 404):
+                  spawner.log.warning(
+                      "No Slurm token for %s (HTTP %s) - denying HPC access",
+                      username, e.code,
+                  )
+                  raise web.HTTPError(403, _NO_HPC) from e
+              # Anything else (5xx, timeout, connection refused) is the token
+              # store failing, not a membership decision - say so plainly.
+              raise web.HTTPError(
+                  503,
+                  "The HPC token service is currently unavailable; "
+                  "please try again later.",
+              ) from e
+
+          token = (json.loads(resp.body) or {}).get("slurm_token")
+          if not token:
+              # Defensive: a 200 with no token still means no HPC access.
+              raise web.HTTPError(403, _NO_HPC)
+          spawner.log.info("Loaded per-user Slurm token for %s", username)
+          return token
+
+      async def fetch_user_slurm_token(spawner):
+          # Authoritative gate right before submission (also covers a direct
+          # POST that skips the options-form GET).
+          spawner.slurm_token = await resolve_slurm_token(spawner)
+
+      c.SlurmRESTAPISpawner.pre_spawn_hook = fetch_user_slurm_token
+
+      async def hpc_options_form(spawner):
+          # Check HPC access first: if the user has no team token this raises
+          # and JupyterHub shows the message page INSTEAD of the form below.
+          await resolve_slurm_token(spawner)
+          s = spawner
+          # Same form as the spawner's default, minus the manual "Token" field
+          # (the token is resolved automatically from the token store).
+          return f"""
+      <div style="max-width: 400px; margin: auto;">
+          <div style="margin-bottom: 1em;">
+              <label for="slurm-account">Account</label>
+              <input name="account" id="slurm-account" type="text" value="{s.account}" placeholder="Enter account" style="width: 100%;" />
+          </div>
+          <div style="margin-bottom: 1em;">
+              <label for="slurm-partition">Partition</label>
+              <input name="partition" id="slurm-partition" type="text" value="{s.partition}" placeholder="Enter partition" style="width: 100%;" />
+          </div>
+          <div style="margin-bottom: 1em;">
+              <label for="slurm-qos">QoS</label>
+              <input name="qos" id="slurm-qos" type="text" value="{s.qos}" placeholder="Enter QoS" style="width: 100%;" />
+          </div>
+          <div style="margin-bottom: 1em;">
+              <label for="slurm-time-limit">Time Limit</label>
+              <input name="time_limit" id="slurm-time-limit" type="text" value="{s.time_limit}" placeholder="e.g., 02:00:00" style="width: 100%;" />
+          </div>
+          <div style="margin-bottom: 1em;">
+              <label for="slurm-user">Slurm User</label>
+              <input name="slurm_user" id="slurm-user" type="text" value="{s.slurm_user}" placeholder="Enter Slurm user" style="width: 100%;" />
+          </div>
+          <div style="margin-bottom: 1em;">
+              <label for="cwd">Current Working Directory</label>
+              <input name="current_working_directory" id="cwd" type="text" value="{s.current_working_directory}" placeholder="Enter working directory" style="width: 100%;" />
+          </div>
+      </div>
+      """
+
+      c.SlurmRESTAPISpawner.options_form = hpc_options_form
+
       c.SlurmRESTAPISpawner.environment = {
           "COMPUTE_HUB_BASE": os.environ["COMPUTE_HUB_BASE"]
       }
       c.SlurmRESTAPISpawner.slurmrestd_url = "https://slurm.cloud.lxp.lu"
-      c.SlurmRESTAPISpawner.slurm_api_version = "v0.0.40" #43?
+      # slurmrestd at slurm.cloud.lxp.lu dropped v0.0.40 (404); it now serves
+      # v0.0.41-v0.0.44. Using the newest available.
+      c.SlurmRESTAPISpawner.slurm_api_version = "v0.0.44"
       c.SlurmRESTAPISpawner.slurm_user = os.environ["SLURM_USER"]
-      c.SlurmRESTAPISpawner.slurm_token = os.environ["SLURM_TOKEN"]
+      # No shared/default token: the per-user token from the token store
+      # (set in fetch_user_slurm_token) is the ONLY way a spawn gets a token.
       c.SlurmRESTAPISpawner.partition = "gpu"
       c.SlurmRESTAPISpawner.account = os.environ["SLURM_ACCOUNT"]
       c.SlurmRESTAPISpawner.qos = "default"
