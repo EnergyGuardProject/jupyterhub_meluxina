@@ -109,7 +109,7 @@ hub:
       )
 
       # Per-user Slurm token: after Keycloak login, resolve the user's email and
-      # ask the token-store service (keyed on email -> team -> token) for their
+      # ask the token-store service for their
       # Slurm token, then supply it to the spawn. If the user has no team token
       # (token store returns 404) the pre_spawn_hook raises and JupyterHub shows
       # a "no HPC access" screen instead of starting a server. Re-checked on
