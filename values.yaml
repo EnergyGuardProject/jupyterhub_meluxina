@@ -210,7 +210,6 @@ hub:
           uv pip install git+https://github.com/LuxProvide/slurmrestapispawner.git
       fi
       source $VENV/bin/activate
-      Local cert, 
       export REQUESTS_CA_BUNDLE=$HOME/certs/mkcert-ca.crt
       export SSL_CERT_FILE="${REQUESTS_CA_BUNDLE}"
       export CURL_CA_BUNDLE="${REQUESTS_CA_BUNDLE}"
