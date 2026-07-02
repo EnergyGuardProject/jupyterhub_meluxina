@@ -7,17 +7,23 @@ spawning single-user servers as **Slurm jobs on MeluXina** via the
 Users log in with **Keycloak** (OIDC). At spawn time the Hub resolves the user's
 email and asks the
 [token-store service](https://github.com/EnergyGuardProject/keycloak_meluxina_map)
-for their team's Slurm token; that token is what authenticates the Slurm job
-submission. Users with no team token are denied HPC access.
+for their team's Slurm token and MeluXina project; the token authenticates
+the Slurm job submission, and the project drives the Slurm account and working
+directory. Users with no team token are denied HPC access.
 
 ## Login & spawn flow
 
 1. User clicks sign in and authenticates against Keycloak.
 2. The Hub reads the user's email from the (encrypted) OAuth `auth_state`.
 3. `pre_spawn_hook` calls `GET /users/{email}/token` on the token store
-   (`X-API-Key`), which resolves the user's team and returns that team's token.
-4. The token is set on the spawner and used to submit the job to `slurmrestd`.
-   No token → the user sees a "no HPC access" page instead of a server.
+   (`X-API-Key`), which resolves the user's team and returns that team's
+   `slurm_token` and `meluxina_project_name`.
+4. The Hub sets, per user, on the spawner:
+   - `slurm_token` — authenticates the job submission,
+   - `account` — the MeluXina project name,
+   - `current_working_directory` — `/project/home/<project>/jovyan/work`.
+5. The job is submitted to `slurmrestd`. No token (or no project) → the user
+   sees a "no HPC access" page instead of a server.
 
 ## Repository contents
 
@@ -29,13 +35,12 @@ submission. Users with no team token are denied HPC access.
 
 ## Deploy
 
-Build/push the hub image (tag referenced in `values.yaml`):
 
 ```bash
-docker build -t theopnt12/jupyterhub-meluxina:v3-amd64 .
-docker push theopnt12/jupyterhub-meluxina:v3-amd64
+docker build --no-cache --platform linux/amd64 \
+  -t theopnt12/jupyterhub-meluxina:v4-amd64 .
+docker push theopnt12/jupyterhub-meluxina:v4-amd64
 ```
-
 Apply secrets and install the chart:
 
 ```bash

@@ -7,23 +7,13 @@ ingress:
 hub:
   image:
     name: theopnt12/jupyterhub-meluxina
-    tag: v3-amd64
+    tag: v4-amd64
   extraEnv:
     SLURM_USER:
       valueFrom:
         secretKeyRef:
           name: meluxina-credentials
           key: slurm-user
-    SLURM_ACCOUNT:
-      valueFrom:
-        secretKeyRef:
-          name: meluxina-credentials
-          key: slurm-account
-    WORKING_DIRECTORY:
-      valueFrom:
-        secretKeyRef:
-          name: meluxina-credentials
-          key: working-directory
     COMPUTE_HUB_BASE:
       valueFrom:
         secretKeyRef:
@@ -120,13 +110,21 @@ hub:
       from tornado.httpclient import AsyncHTTPClient, HTTPClientError, HTTPRequest
 
       _NO_HPC = (
-          "You are not a member of a team with access to HPC. "
-          "Contact your administrator to be added to a team."
+          "You are not a member of a team with access to HPC."
       )
 
-      async def resolve_slurm_token(spawner):
-          """Return the user's Slurm token, or raise web.HTTPError.
+      # MeluXina project directories live under this base; a user's working
+      # directory is <base>/<project>/jovyan/work (mirrors the convention in
+      # the meluxina-credentials secret's working-directory).
+      _PROJECT_HOME_BASE = "/project/home"
 
+      def _working_directory_for(project):
+          return f"{_PROJECT_HOME_BASE}/{project}/jovyan/work"
+
+      async def resolve_slurm_token(spawner):
+          """Return (slurm_token, meluxina_project_name) for the user.
+
+          Raises web.HTTPError:
           403 -> the user has no team token (no HPC access);
           503 -> the token store itself is unreachable/erroring.
           """
@@ -163,17 +161,27 @@ hub:
                   "please try again later.",
               ) from e
 
-          token = (json.loads(resp.body) or {}).get("slurm_token")
-          if not token:
-              # Defensive: a 200 with no token still means no HPC access.
+          body = json.loads(resp.body) or {}
+          token = body.get("slurm_token")
+          project = body.get("meluxina_project_name")
+          if not token or not project:
+              # Defensive: a 200 without a token or project still means no HPC
+              # access (the project drives the Slurm account and working dir).
               raise web.HTTPError(403, _NO_HPC)
-          spawner.log.info("Loaded per-user Slurm token for %s", username)
-          return token
+          spawner.log.info(
+              "Loaded per-user Slurm token and project %s for %s", project, username
+          )
+          return token, project
 
       async def fetch_user_slurm_token(spawner):
           # Authoritative gate right before submission (also covers a direct
-          # POST that skips the options-form GET).
-          spawner.slurm_token = await resolve_slurm_token(spawner)
+          # POST that skips the options-form GET). The user's MeluXina project
+          # drives the Slurm account and working directory; both are resolved
+          # here and are NOT user-editable in the spawn form.
+          token, project = await resolve_slurm_token(spawner)
+          spawner.slurm_token = token
+          spawner.account = project
+          spawner.current_working_directory = _working_directory_for(project)
 
       c.SlurmRESTAPISpawner.pre_spawn_hook = fetch_user_slurm_token
 
@@ -188,10 +196,11 @@ hub:
       # No shared/default token: the per-user token from the token store
       # (set in fetch_user_slurm_token) is the ONLY way a spawn gets a token.
       c.SlurmRESTAPISpawner.partition = "gpu"
-      c.SlurmRESTAPISpawner.account = os.environ["SLURM_ACCOUNT"]
+      # account and current_working_directory are resolved per-user from the
+      # user's MeluXina project in fetch_user_slurm_token (pre_spawn_hook), so
+      # they are deliberately NOT set (or exposed in the form) here.
       c.SlurmRESTAPISpawner.qos = "default"
       c.SlurmRESTAPISpawner.time_limit = "02:00:00"
-      c.SlurmRESTAPISpawner.current_working_directory = os.environ["WORKING_DIRECTORY"]
       c.SlurmRESTAPISpawner.start_timeout = 600
       c.SlurmRESTAPISpawner.debug_slurm_api = False
       c.SlurmRESTAPISpawner.debug_show_batch_script = False

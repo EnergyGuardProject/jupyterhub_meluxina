@@ -20,3 +20,4 @@ spec:
                 name: proxy-public
                 port:
                   number: 80
+                  
