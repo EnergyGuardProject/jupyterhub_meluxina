@@ -9,11 +9,6 @@ hub:
     name: theopnt12/jupyterhub-meluxina
     tag: v4-amd64
   extraEnv:
-    SLURM_USER:
-      valueFrom:
-        secretKeyRef:
-          name: meluxina-credentials
-          key: slurm-user
     COMPUTE_HUB_BASE:
       valueFrom:
         secretKeyRef:
@@ -122,7 +117,7 @@ hub:
           return f"{_PROJECT_HOME_BASE}/{project}/jovyan/work"
 
       async def resolve_slurm_token(spawner):
-          """Return (slurm_token, meluxina_project_name) for the user.
+          """Return (slurm_token, meluxina_project_name, service_user) for the user.
 
           Raises web.HTTPError:
           403 -> the user has no team token (no HPC access);
@@ -164,23 +159,28 @@ hub:
           body = json.loads(resp.body) or {}
           token = body.get("slurm_token")
           project = body.get("meluxina_project_name")
-          if not token or not project:
-              # Defensive: a 200 without a token or project still means no HPC
-              # access (the project drives the Slurm account and working dir).
+          service_user = body.get("service_user")
+          if not token or not project or not service_user:
+              # Defensive: a 200 without a token, project or service user still
+              # means no HPC access (the project drives the Slurm account and
+              # working dir; the service user authenticates the REST requests).
               raise web.HTTPError(403, _NO_HPC)
           spawner.log.info(
-              "Loaded per-user Slurm token and project %s for %s", project, username
+              "Loaded per-user Slurm token, project %s and service user %s for %s",
+              project, service_user, username
           )
-          return token, project
+          return token, project, service_user
 
       async def fetch_user_slurm_token(spawner):
           # Authoritative gate right before submission (also covers a direct
           # POST that skips the options-form GET). The user's MeluXina project
-          # drives the Slurm account and working directory; both are resolved
+          # drives the Slurm account and working directory, and the team's
+          # service user authenticates the REST requests; all are resolved
           # here and are NOT user-editable in the spawn form.
-          token, project = await resolve_slurm_token(spawner)
+          token, project, service_user = await resolve_slurm_token(spawner)
           spawner.slurm_token = token
           spawner.account = project
+          spawner.slurm_user = service_user
           spawner.current_working_directory = _working_directory_for(project)
 
       c.SlurmRESTAPISpawner.pre_spawn_hook = fetch_user_slurm_token
@@ -192,12 +192,11 @@ hub:
       # slurmrestd at slurm.cloud.lxp.lu dropped v0.0.40 (404); it now serves
       # v0.0.41-v0.0.44. Using the newest available.
       c.SlurmRESTAPISpawner.slurm_api_version = "v0.0.44"
-      c.SlurmRESTAPISpawner.slurm_user = os.environ["SLURM_USER"]
       # No shared/default token: the per-user token from the token store
       # (set in fetch_user_slurm_token) is the ONLY way a spawn gets a token.
       c.SlurmRESTAPISpawner.partition = "gpu"
-      # account and current_working_directory are resolved per-user from the
-      # user's MeluXina project in fetch_user_slurm_token (pre_spawn_hook), so
+      # account, slurm_user and current_working_directory are resolved per-user
+      # from the token store in fetch_user_slurm_token (pre_spawn_hook), so
       # they are deliberately NOT set (or exposed in the form) here.
       c.SlurmRESTAPISpawner.qos = "default"
       c.SlurmRESTAPISpawner.time_limit = "02:00:00"
