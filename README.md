@@ -7,9 +7,10 @@ spawning single-user servers as **Slurm jobs on MeluXina** via the
 Users log in with **Keycloak** (OIDC). At spawn time the Hub resolves the user's
 email and asks the
 [token-store service](https://github.com/EnergyGuardProject/keycloak_meluxina_map)
-for their team's Slurm token and MeluXina project; the token authenticates
-the Slurm job submission, and the project drives the Slurm account and working
-directory. Users with no team token are denied HPC access.
+for their team's Slurm token, MeluXina project and service user; the token
+authenticates the Slurm job submission, the project drives the Slurm account and
+working directory, and the service user is the Slurm username used for the REST
+requests. Users with no team token are denied HPC access.
 
 ## Login & spawn flow
 
@@ -17,13 +18,15 @@ directory. Users with no team token are denied HPC access.
 2. The Hub reads the user's email from the (encrypted) OAuth `auth_state`.
 3. `pre_spawn_hook` calls `GET /users/{email}/token` on the token store
    (`X-API-Key`), which resolves the user's team and returns that team's
-   `slurm_token` and `meluxina_project_name`.
+   `slurm_token`, `meluxina_project_name` and `service_user`.
 4. The Hub sets, per user, on the spawner:
    - `slurm_token` — authenticates the job submission,
    - `account` — the MeluXina project name,
+   - `slurm_user` — the team's service user (Slurm username for REST requests),
    - `current_working_directory` — `/project/home/<project>/jovyan/work`.
-5. The job is submitted to `slurmrestd`. No token (or no project) → the user
-   sees a "no HPC access" page instead of a server.
+   None of these are user-editable in the spawn form.
+5. The job is submitted to `slurmrestd`. No token (or no project / service user)
+   → the user sees a "no HPC access" page instead of a server.
 
 ## Repository contents
 
