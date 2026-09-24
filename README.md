@@ -28,6 +28,47 @@ requests. Users with no team token are denied HPC access.
 5. The job is submitted to `slurmrestd`. No token (or no project / service user)
    → the user sees a "no HPC access" page instead of a server.
 
+## EnergyGuard kernel (`eg-default`)
+
+Replicates the kernel from
+[EnergyGuard-JupyterHub](https://github.com/epu-ntua/EnergyGuard-JupyterHub)'s
+`Dockerfile.singleuser`, adapted from a container image to a venv on shared
+storage. The `energyguard-sdk` / MLflow SSO layer is **not** installed yet.
+
+Two deliberate deviations from upstream:
+
+- **PyTorch comes from a MeluXina module**, not the PyPI wheel, so it is built
+  against the cluster's CUDA. A constraints file pins that version so pip
+  cannot install a PyPI torch over it (`pytorch_lightning` would otherwise
+  drag one in). `numpy` is left unpinned for the same reason — forcing
+  upstream's version risks an ABI mismatch with the module's torch.
+- **`jupyterhub` is not pinned to 4.1.6.** The Hub here runs 5.x, and the
+  singleuser server must match it.
+
+The build runs inline in the spawner prologue, guarded by a stamp file:
+
+| Path | Written | Purpose |
+|------|---------|---------|
+| `$HOME/eg-kernel/` | once | Kernel venv: module PyTorch + mlflow, pandas, sklearn, … |
+| `$HOME/eg-kernel/bin/eg-kernel-launch` | once | Re-loads the PyTorch module, then execs `ipykernel_launcher` |
+| `$VENV/share/jupyter/kernels/eg-default/kernel.json` | once | Makes the kernel visible to JupyterLab |
+| `$VENV/etc/jupyter/jupyter_server_config.py` | once | `default_kernel_name = 'eg-default'` |
+| `$HOME/eg-kernel/.eg-complete-v${EG_VERSION}` | once | Stamp; its absence triggers a rebuild |
+
+Because every member of a team spawns as the same Slurm **service user**, this
+builds once per team: the first spawn pays for it, everyone after inherits it,
+and new users do nothing. A team with a different `service_user` gets its own
+build. Bump `EG_VERSION` in `values.yaml` to force all teams to rebuild after a
+package change.
+
+A failed build writes no stamp and removes the partial venv, so the next spawn
+retries rather than serving a broken kernel forever. The spawn itself still
+succeeds — a kernel problem must not cost the user their server.
+
+> **Set `EG_TORCH_MODULE` in `values.yaml` before deploying.** It ships as
+> `PyTorch/UNSET`; use the exact string from `module spider PyTorch` on a login
+> node. Until then every spawn logs a build failure and offers no kernel.
+
 ## Repository contents
 
 | File | Purpose |

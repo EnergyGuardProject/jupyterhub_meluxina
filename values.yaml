@@ -61,8 +61,8 @@ hub:
       from oauthenticator.generic import GenericOAuthenticator
       c.JupyterHub.authenticator_class = GenericOAuthenticator
 
-      # Client is configured with localhost redirect URIs for now.
-      _base_url = "http://localhost:8088"
+      # Public URL of this Hub; the Keycloak client's redirect URIs must match.
+      _base_url = os.environ["COMPUTE_HUB_BASE"].rstrip("/")
 
       _keycloak_realm_url = (
           os.environ["KEYCLOAK_BASE_URL"].rstrip("/")
@@ -200,7 +200,10 @@ hub:
       # they are deliberately NOT set (or exposed in the form) here.
       c.SlurmRESTAPISpawner.qos = "default"
       c.SlurmRESTAPISpawner.time_limit = "02:00:00"
-      c.SlurmRESTAPISpawner.start_timeout = 600
+      # Generous because the FIRST spawn for a new team builds the eg-default
+      # kernel venv inline (see prologue); later spawns skip it via the stamp
+      # file. Must stay above the prologue's 1800s concurrent-build wait.
+      c.SlurmRESTAPISpawner.start_timeout = 2400
       c.SlurmRESTAPISpawner.debug_slurm_api = False
       c.SlurmRESTAPISpawner.debug_show_batch_script = False
       c.SlurmRESTAPISpawner.enable_user_options_form = True
@@ -218,6 +221,123 @@ hub:
           uv pip install git+https://github.com/LuxProvide/slurmrestapispawner.git
       fi
       source $VENV/bin/activate
+
+      # ---- EnergyGuard kernel (eg-default) ------------------------------
+      # Mirrors Dockerfile.singleuser from epu-ntua/EnergyGuard-JupyterHub,
+      # adapted from a container image to a venv on shared storage. Built once
+      # per Slurm service user: every member of a team spawns as the same Unix
+      # user, so the first spawn for a new team pays the build and every spawn
+      # after it is a no-op. energyguard-sdk / MLflow SSO is NOT installed yet.
+      #
+      # MeluXina module providing PyTorch (built against the cluster's CUDA).
+      # From `module spider PyTorch`: newest CUDA build, the -whl variant is
+      # the official PyTorch wheel (best pip compatibility). Upstream pins
+      # torch==2.10.0; 2.9.1 is the closest available and pytorch_lightning
+      # 2.6.1 (targeting 2.10) supports it.
+      EG_TORCH_MODULE="PyTorch/2.9.1-foss-2025a-CUDA-12.8.0-whl"
+
+      EG_VERSION=1
+      EG_ENV="$HOME/eg-kernel"
+      EG_STAMP="$EG_ENV/.eg-complete-v${EG_VERSION}"
+      EG_LOCK="$HOME/.eg-kernel-build.lock"
+
+      # Never start a build the job cannot finish. The spawn form lets users
+      # pick the wall clock (as low as 10 min), and a build killed halfway
+      # wastes their allocation and strands a lock. Require ~30 min headroom.
+      EG_MIN_SECONDS=1800
+      EG_TIME_OK=1
+      if [[ -n "${SLURM_JOB_END_TIME:-}" ]]; then
+          (( SLURM_JOB_END_TIME - $(date +%s) < EG_MIN_SECONDS )) && EG_TIME_OK=0
+      fi
+
+      if [[ ! -f "$EG_STAMP" && $EG_TIME_OK -eq 0 ]]; then
+          echo "EnergyGuard kernel is not built yet and under 30 min of job time remains - skipping the build. Spawn once with a longer time limit to build it." >&2
+      elif [[ ! -f "$EG_STAMP" ]]; then
+          # A job killed at its Slurm wall-clock limit cannot run its EXIT trap,
+          # so the lock can outlive the builder and stall every later spawn.
+          # Reclaim one that is clearly stale.
+          if [[ -d "$EG_LOCK" ]] && [[ -n "$(find "$EG_LOCK" -maxdepth 0 -mmin +60 2>/dev/null)" ]]; then
+              echo "Reclaiming stale EnergyGuard build lock (>60 min old)" >&2
+              rmdir "$EG_LOCK" 2>/dev/null
+          fi
+          # mkdir is atomic on Lustre; flock is not reliably supported there.
+          # Bump EG_VERSION to force every team to rebuild on a package change.
+          if mkdir "$EG_LOCK" 2>/dev/null; then
+              # TERM/INT too: Slurm sends SIGTERM at the wall limit, and a bare
+              # EXIT trap does not fire on it.
+              trap 'rmdir "$EG_LOCK" 2>/dev/null' EXIT TERM INT
+              rm -rf "$EG_ENV"
+              # Subshell: these module changes must not disturb the Python that
+              # test_restapi - and the running singleuser server - depend on.
+              (
+                  # set -e is load-bearing: without it a failed `module load`
+                  # still falls through and stamps a broken env as complete,
+                  # which would never retry.
+                  set -e
+                  module purge
+                  module load "$EG_TORCH_MODULE"
+                  python3 -m venv --system-site-packages "$EG_ENV"
+                  "$EG_ENV/bin/pip" install --no-cache-dir --upgrade pip
+                  # Pin the module's torch so pip can never install a PyPI
+                  # torch over it - pytorch_lightning would otherwise drag one
+                  # in and shadow the CUDA build we actually want.
+                  "$EG_ENV/bin/python" -c 'import torch; print("torch==" + torch.__version__.split("+")[0])' > "$EG_ENV/constraints.txt"
+                  "$EG_ENV/bin/pip" install --no-cache-dir -c "$EG_ENV/constraints.txt" \
+                      ipykernel \
+                      mlflow==3.8.1 \
+                      minio==7.2.20 \
+                      boto3==1.42.34 \
+                      python-dotenv==1.2.1 \
+                      pyarrow==22.0.0 \
+                      pandas==2.3.3 \
+                      matplotlib==3.10.8 \
+                      scikit-learn==1.8.0 \
+                      tqdm==4.67.1 \
+                      requests==2.32.5 \
+                      pytorch_lightning==2.6.1
+              )
+              EG_RC=$?
+              if [[ $EG_RC -ne 0 ]]; then
+                  # Leave NO stamp and remove the partial venv, so the next
+                  # spawn retries instead of serving a half-built kernel
+                  # forever. The spawn itself continues regardless - a broken
+                  # kernel must not cost the user their server.
+                  echo "EnergyGuard kernel build FAILED (rc=$EG_RC) for $EG_TORCH_MODULE - no stamp written, next spawn will retry" >&2
+                  rm -rf "$EG_ENV"
+              else
+              # The kernel is launched by the server, which does NOT have the
+              # PyTorch module loaded, so the kernel re-loads it itself instead
+              # of relying on inherited environment.
+              printf '%s\n' '#!/bin/bash' 'module purge' "module load $EG_TORCH_MODULE" "source $EG_ENV/bin/activate" 'exec python -m ipykernel_launcher "$@"' > "$EG_ENV/bin/eg-kernel-launch"
+              chmod +x "$EG_ENV/bin/eg-kernel-launch"
+              # Kernelspec lives in the SERVER's venv so JupyterLab discovers it
+              # under {sys.prefix}/share/jupyter/kernels, while the kernel
+              # process itself runs out of eg-kernel.
+              mkdir -p "$VENV/share/jupyter/kernels/eg-default"
+              printf '{"argv": ["%s/bin/eg-kernel-launch", "-f", "{connection_file}"], "display_name": "EnergyGuard (Python)", "language": "python"}\n' "$EG_ENV" > "$VENV/share/jupyter/kernels/eg-default/kernel.json"
+              # Same role as upstream's /etc/jupyter/jupyter_server_config.py;
+              # Jupyter reads {sys.prefix}/etc/jupyter.
+              mkdir -p "$VENV/etc/jupyter"
+              printf "c.MappingKernelManager.default_kernel_name = 'eg-default'\n" > "$VENV/etc/jupyter/jupyter_server_config.py"
+              touch "$EG_STAMP"
+              fi
+              rmdir "$EG_LOCK" 2>/dev/null
+              trap - EXIT
+          else
+              # A concurrent spawn is building it. Wait briefly, then give up
+              # and start the server anyway - the kernel will be there next
+              # time. Never burn the user's whole wall-clock allocation
+              # waiting on someone else's build.
+              echo "EnergyGuard kernel build in progress elsewhere - waiting up to 5 min" >&2
+              for _ in $(seq 1 30); do
+                  [[ -f "$EG_STAMP" ]] && break
+                  sleep 10
+              done
+              [[ -f "$EG_STAMP" ]] || echo "Kernel not ready yet; starting server without it" >&2
+          fi
+      fi
+      # ---- end EnergyGuard kernel ---------------------------------------
+
       export REQUESTS_CA_BUNDLE=$HOME/certs/mkcert-ca.crt
       export SSL_CERT_FILE="${REQUESTS_CA_BUNDLE}"
       export CURL_CA_BUNDLE="${REQUESTS_CA_BUNDLE}"
