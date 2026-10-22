@@ -74,7 +74,11 @@ hub:
       c.GenericOAuthenticator.authorize_url = _keycloak_realm_url + "/auth"
       c.GenericOAuthenticator.token_url = _keycloak_realm_url + "/token"
       c.GenericOAuthenticator.userdata_url = _keycloak_realm_url + "/userinfo"
-      c.GenericOAuthenticator.oauth_callback_url = _base_url + "/hub/oauth_callback"
+      # Must be listed as a valid redirect URI on the Keycloak client
+      # jupyterhub-meluxina.
+      c.GenericOAuthenticator.oauth_callback_url = (
+          "https://jupyterhub-meluxina.energy-guard.eu/hub/oauth_callback"
+      )
       c.GenericOAuthenticator.login_service = "Keycloak"
       c.GenericOAuthenticator.scope = ["openid", "profile", "email"]
       c.GenericOAuthenticator.username_claim = "preferred_username"

@@ -37,6 +37,10 @@ at the next spawn.
 
 Logging out of JupyterHub also ends the Keycloak session.
 
+The Keycloak client `jupyterhub-meluxina` must list
+`https://jupyterhub-meluxina.energy-guard.eu/hub/oauth_callback` as a valid
+redirect URI. This is the `oauth_callback_url` set in `values.yaml`.
+
 ## Slurm job settings
 
 | Setting | Value |
@@ -119,7 +123,7 @@ keys under `stringData`.
 
 | Key | Content |
 |-----|---------|
-| `compute-hub-base` | Public URL of the Hub. The Keycloak client redirect URIs must match it |
+| `compute-hub-base` | Public URL of the Hub that compute nodes use to reach the Hub API |
 | `keycloak_base_url` | Keycloak base URL |
 | `keycloak_realm` | Keycloak realm |
 | `keycloak_client_id` | Keycloak client ID |
