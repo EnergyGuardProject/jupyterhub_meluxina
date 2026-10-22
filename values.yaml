@@ -5,6 +5,8 @@ ingress:
   enabled: false
 
 hub:
+  db:
+    type: sqlite-memory
   image:
     name: theopnt12/jupyterhub-meluxina
     tag: v4-amd64
@@ -61,8 +63,10 @@ hub:
       from oauthenticator.generic import GenericOAuthenticator
       c.JupyterHub.authenticator_class = GenericOAuthenticator
 
-      # Public URL of this Hub; the Keycloak client's redirect URIs must match.
-      _base_url = os.environ["COMPUTE_HUB_BASE"].rstrip("/")
+      # Public URL of this Hub. The Keycloak client jupyterhub-meluxina must
+      # allow {_public_url}/hub/oauth_callback as a valid redirect URI and
+      # {_public_url}/hub/login as a valid post logout redirect URI.
+      _public_url = "https://jupyterhub-meluxina.energy-guard.eu"
 
       _keycloak_realm_url = (
           os.environ["KEYCLOAK_BASE_URL"].rstrip("/")
@@ -74,11 +78,7 @@ hub:
       c.GenericOAuthenticator.authorize_url = _keycloak_realm_url + "/auth"
       c.GenericOAuthenticator.token_url = _keycloak_realm_url + "/token"
       c.GenericOAuthenticator.userdata_url = _keycloak_realm_url + "/userinfo"
-      # Must be listed as a valid redirect URI on the Keycloak client
-      # jupyterhub-meluxina.
-      c.GenericOAuthenticator.oauth_callback_url = (
-          "https://jupyterhub-meluxina.energy-guard.eu/hub/oauth_callback"
-      )
+      c.GenericOAuthenticator.oauth_callback_url = _public_url + "/hub/oauth_callback"
       c.GenericOAuthenticator.login_service = "Keycloak"
       c.GenericOAuthenticator.scope = ["openid", "profile", "email"]
       c.GenericOAuthenticator.username_claim = "preferred_username"
@@ -93,7 +93,7 @@ hub:
       c.GenericOAuthenticator.logout_redirect_url = (
           _keycloak_realm_url + "/logout?" + urlencode({
               "client_id": os.environ["KEYCLOAK_CLIENT_ID"],
-              "post_logout_redirect_uri": _base_url + "/hub/login",
+              "post_logout_redirect_uri": _public_url + "/hub/login",
           })
       )
 
