@@ -64,7 +64,6 @@ hub:
 
   extraConfig:
     01-custom-config: |
-      c.JupyterHub.spawner_class = "slurmrestapispawner.SlurmRESTAPISpawner"
 
       # Keycloak (OIDC) authentication via GenericOAuthenticator.
       from urllib.parse import urlencode
@@ -200,6 +199,57 @@ hub:
           spawner.current_working_directory = _working_directory_for(project)
 
       c.SlurmRESTAPISpawner.pre_spawn_hook = fetch_user_slurm_token
+
+      from slurmrestapispawner import SlurmRESTAPISpawner
+
+      class MeluxinaSlurmSpawner(SlurmRESTAPISpawner):
+          """SlurmRESTAPISpawner that never mistakes a failed check for a dead job.
+
+          Upstream poll() returns "stopped" on ANY error, and the Hub then calls
+          stop(), which scancels the job: one slurmrestd hiccup kills a training
+          run. And the Hub DB keeps only job_id, so after a Hub restart the
+          token/service user are gone and every check fails the same way.
+          """
+
+          async def _ensure_slurm_credentials(self):
+              # Rebuilt from the DB after a Hub restart: re-resolve from the
+              # token store (the user's email is in the encrypted auth_state).
+              if not (self.slurm_token and self.slurm_user):
+                  await fetch_user_slurm_token(self)
+
+          async def poll(self):
+              if not self.job_id:
+                  return 1
+              try:
+                  await self._ensure_slurm_credentials()
+                  job = await self._get_job(self.job_id)
+              except Exception:
+                  self.log.exception(
+                      "Could not check Slurm job %s for %s; assuming it is still running",
+                      self.job_id, self.user.name,
+                  )
+                  return None
+              if not job:
+                  # 404: Slurm no longer knows the job, it has ended.
+                  return 1
+              state = self._job_state(job)
+              if not state:
+                  return None
+              match state[0]:
+                  case "RUNNING" | "PENDING" | "COMPLETING" | "CONFIGURING" | "SUSPENDED":
+                      return None
+                  case "COMPLETED":
+                      return 0
+                  case _:
+                      return 1
+
+          async def stop(self, now=False):
+              if self.job_id:
+                  await self._ensure_slurm_credentials()
+              await super().stop(now)
+
+      # Config set on c.SlurmRESTAPISpawner applies to this subclass too.
+      c.JupyterHub.spawner_class = MeluxinaSlurmSpawner
 
       c.SlurmRESTAPISpawner.environment = {
           "COMPUTE_HUB_BASE": os.environ["COMPUTE_HUB_BASE"]
@@ -354,10 +404,13 @@ hub:
       fi
       # ---- end EnergyGuard kernel ---------------------------------------
 
-      export REQUESTS_CA_BUNDLE=$HOME/certs/mkcert-ca.crt
+      # Trust the public CAs AND the mkcert CA that signs the Hub's cert, so
+      # code in the server/kernels can still reach normal HTTPS sites.
+      cat /etc/pki/tls/certs/ca-bundle.crt "$HOME/certs/mkcert-ca.crt" > "$HOME/certs/ca-bundle-with-mkcert.crt"
+      export REQUESTS_CA_BUNDLE="$HOME/certs/ca-bundle-with-mkcert.crt"
       export SSL_CERT_FILE="${REQUESTS_CA_BUNDLE}"
       export CURL_CA_BUNDLE="${REQUESTS_CA_BUNDLE}"
       export JUPYTERHUB_API_URL="${COMPUTE_HUB_BASE}/hub/api"
       export JUPYTERHUB_ACTIVITY_URL="${JUPYTERHUB_API_URL}/users/${JUPYTERHUB_USER}/activity"
-      env | grep JUPYTER"""
+      env | grep JUPYTER | sed 's/TOKEN=.*/TOKEN=***/'"""
       #
