@@ -4,9 +4,17 @@ imagePullSecrets:
 ingress:
   enabled: false
 
+# Idle culling is off: a nohup/background run in a server produces no activity,
+# so the culler would stop servers mid-training. Sessions end at the Slurm
+# time limit chosen in the spawn form instead.
+cull:
+  enabled: false
+
 hub:
+  # SQLite on the hub-db-dir PVC, so users and running servers survive hub
+  # restarts and redeploys.
   db:
-    type: sqlite-memory
+    type: sqlite-pvc
   image:
     name: theopnt12/jupyterhub-meluxina
     tag: v4-amd64
@@ -87,6 +95,10 @@ hub:
       # Persist the OAuth response (encrypted with JUPYTERHUB_CRYPT_KEY) so the
       # spawner can read the user's email and resolve their per-user Slurm token.
       c.GenericOAuthenticator.enable_auth_state = True
+      # Never re-validate against Keycloak after login. Otherwise an expired
+      # Keycloak session marks the user's auth as stale and the Hub rejects the
+      # running server's API token (activity updates get 403).
+      c.GenericOAuthenticator.auth_refresh_age = 0
 
       # RP-initiated logout: logging out of JupyterHub also ends the Keycloak
       # SSO session, otherwise the next login silently re-authenticates.
