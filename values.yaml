@@ -270,6 +270,9 @@ hub:
       # kernel venv inline (see prologue); later spawns skip it via the stamp
       # file. Must stay above the prologue's 1800s concurrent-build wait.
       c.SlurmRESTAPISpawner.start_timeout = 2400
+      # Time from the server reporting its port to answering /api. JupyterLab
+      # loads from Lustre, which on slow days takes over the 30 s default.
+      c.SlurmRESTAPISpawner.http_timeout = 180
       c.SlurmRESTAPISpawner.debug_slurm_api = False
       c.SlurmRESTAPISpawner.debug_show_batch_script = False
       c.SlurmRESTAPISpawner.enable_user_options_form = True
